@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+# Script:   Auto-Extract (Python edition)
+# Author:  Joel Elkins <joel@elkins.com>
+# Original Author:   Mark Stahler <markstahler@gmail.com>
+# Version:  2.001
+# License:  BSD
+#
+# Description:  Unpakr is a script designed to be run as a cron job (or
+#   scheduled task).  Its purpose is to recursively scan a directory for
+#   archive files, extract them, and then.  Upload them to a cloud service
+#   using rclone. The script is designed to be run at regular intervals and
+#   will create a file named .unpakr.unrared in each directory that contains an
+#   archive extracted by the script, and a file named .unpakr.rcloned when the
+#   archive has been sent to the cloud service via rclone. These files are used
+#   to tell the script, on subsequent scans, that the archive in the marked
+#   folder has previously been extracted and uploaded. The script will create
+#   a lock file in the target directory to prevent contention from multiple
+#   concurrent invocations.
+#
+# Limitations:  Auto-Extract has been written to support one archive group per
+#   directory scanned (Example a movie in its own directory with files .rar,
+#   .r01, .r02, .nfo, etc). This works well with movies and other files that
+#   are packed and downloaded in individual directories.
+#
+#   Auto-Extract will overwrite previously extracted files if it does not find
+#   a .unrared file present in the archive directory.
+#
+# Requirements:
+# -Python 3.5 or newer
+# -unrar in your path [Freeware command line version available from http://www.rarlab.com/]
+#
+# BUGS:
+#   -Cannot tell if an archive has been fully downloaded
+#
+# TODO:
+#   -Proper logging (ie. debug, info messages)
+#   -Check for available disk space and estimate required
+#   -Support for other archive types
+#
+
+import logging
+import os
+import os.path
+import sys
+from pathlib import Path
+import subprocess
+
+file_ext_unpacked = '.unpakr-unpacked'
+file_name_lock = '.unpakr-locked'
+if sys.platform == "win32":
+    exe_unrar = "UnRAR.exe"
+else:
+    exe_unrar = 'unrar'
+file_ext_supported = {
+        '.rar': ['unrar', 'x', '-idq', '-y', 'ARCHIVE', 'DESTINATION'],
+        '.r01': ['unrar', 'x', '-idq', '-y', 'ARCHIVE', 'DESTINATION'],
+        '.zip': ['unzip', '-q', '-o', 'ARCHIVE', '-d', 'DESTINATION'],
+}
+
+### Configuration
+logging.basicConfig(
+    filename='unpakr.log',
+    level='DEBUG',
+    format='%(asctime)s %(module)s %(levelname)s %(message)s'
+)
+rclone_exclude=['*.rar', '*.r[[:digit:]][:digit:]]', '*.zip']
+
+
+class Unrar(object):
+    def __init__(self, download_dir):
+        self.rclone_file_name = ".unpakr.rcloned"
+        self.download_dir = download_dir
+        self.orig_files = []
+        self.orig_dirs = []
+        self.done_archives = []
+
+    def traverse_directories(self):
+        """Scan the download directory and its subdirectories"""
+        # Search download directory and all subdirectories
+        num_errors = 0
+        logging.info("Walking %s...", self.download_dir)
+        for dirname, dirnames, filenames in os.walk(self.download_dir):
+            for d in dirnames:
+                self.orig_dirs.append(os.path.join(dirname, d))
+            for f in filenames:
+                self.orig_files.append(os.path.join(dirname, f))
+            num_errors += self.scan_for_archives(dirname)
+        if num_errors > 0:
+            logging.error('Done walking, encountered %d errors', num_errors)
+        else:
+            logging.info('Done walking with no errors')
+        return num_errors
+
+    def findall(self, path):
+        files = []
+        path = str(path)
+        for dirname, dirnames, filenames in os.walk(path):
+            files += [os.path.relpath(os.path.join(dirname, d), path) for d in dirnames]
+            files += [os.path.relpath(os.path.join(dirname, f), path) for f in filenames]
+        return sorted(files)
+
+    def scan_for_archives(self, dirname):
+        """Check for rar files in each directory"""
+        num_errors = 0
+        target = Path(dirname)
+        for filepath in target.iterdir():
+            arc, ext = os.path.splitext(str(filepath))
+            if filepath.is_file() and ext in file_ext_supported:
+                file_done = target / (arc + file_ext_unpacked)
+                if arc in self.done_archives or file_done.exists():
+                    logging.info('Skipping previously done archive %s', target / filepath)
+                    continue
+                # Start extracting file
+                files_base = self.findall(target)
+                if self.unpack(target, filepath, ext) > 0:
+                    num_errors += 1
+                else:
+                    self.done_archives.append(target / arc)
+                    files_unpacked = sorted(list(set(self.findall(target)) - set(files_base)))
+                    logging.debug('Unpacked %d files', len(files_unpacked))
+                    with file_done.open('w') as f:
+                        for u in files_unpacked:
+                            f.write(u + '\n')
+        return num_errors
+
+    def make_cmd(self, ext, archive, destination):
+        cmd = file_ext_supported[ext].copy()
+        cmd[cmd.index('ARCHIVE')] = archive
+        cmd[cmd.index('DESTINATION')] = destination
+        return cmd
+
+    def unpack(self, target, archive_name, ext):
+        """Extract a rar archive"""
+        # Create command line arguments for rar extractions
+        cmd_args = self.make_cmd(ext, str(target / archive_name), str(target))
+        logging.info('Extracting %s...', (target / archive_name))
+        logging.debug('Executing: %s', ' '.join(cmd_args))
+        rc = subprocess.run(cmd_args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            rc.check_returncode()
+        except subprocess.CalledProcessError as e:
+            logging.error('unpack command returned error: %d', e.returncode)
+            logging.error('unpack command stderr: %s', e.stderr)
+            return 1
+        return 0
+
+    def lock(self):
+        """Creates a hidden file so the script cannot run multiple times"""
+        os.close(os.open(
+            os.path.join(self.download_dir, file_name_lock),
+            os.O_CREAT | os.O_EXCL,
+            0o644
+        ))
+        logging.debug("%s file created", file_name_lock)
+
+    def unlock(self):
+        """Deletes the hidden lock file"""
+        os.unlink(os.path.join(self.download_dir, file_name_lock))
+        logging.debug("%s file deleted", file_name_lock)
+
+if __name__ == "__main__":
+    # Ensure download dir argument is in fact a directory
+    assert(len(sys.argv) > 1 and os.path.isdir(sys.argv[1]))
+    unrar = Unrar(os.path.abspath(sys.argv[1]))
+
+    try:
+        # Obtain the global lock
+        unrar.lock()
+
+        def unlock():
+            """Unlock the global lock file"""
+            unrar.unlock()
+
+        import atexit
+        atexit.register(unlock)
+    except:
+        logging.error("Unable to obtain global lock")
+        exit(1)
+
+    # Extract
+    exit(unrar.traverse_directories())
+
