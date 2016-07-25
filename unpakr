@@ -44,46 +44,53 @@ import os.path
 import sys
 from pathlib import Path
 import subprocess
+import shutil
 
 file_ext_unpacked = '.unpakr-unpacked'
 file_name_lock = '.unpakr-locked'
-if sys.platform == "win32":
-    exe_unrar = "UnRAR.exe"
+if sys.platform == 'win32':
+    exe_unrar = 'UnRAR.exe'
+    exe_unzip = 'unzip.exe'
+    exe_rclone = 'rclone.exe'
 else:
     exe_unrar = 'unrar'
+    exe_unzip = 'unzip'
+    exe_rclone = 'rclone'
 file_ext_supported = {
-        '.rar': ['unrar', 'x', '-idq', '-y', 'ARCHIVE', 'DESTINATION'],
-        '.r01': ['unrar', 'x', '-idq', '-y', 'ARCHIVE', 'DESTINATION'],
-        '.zip': ['unzip', '-q', '-o', 'ARCHIVE', '-d', 'DESTINATION'],
+        '.rar': [exe_unrar, 'x', '-ai', '-idq', '-y', 'ARCHIVE', 'DESTINATION'],
+        '.r01': [exe_unrar, 'x', '-ai', '-idq', '-y', 'ARCHIVE', 'DESTINATION'],
+        '.zip': [exe_unzip, '-q', '-o', 'ARCHIVE', '-d', 'DESTINATION'],
 }
 
-### Configuration
-logging.basicConfig(
-    filename='unpakr.log',
-    level='DEBUG',
-    format='%(asctime)s %(module)s %(levelname)s %(message)s'
-)
-rclone_exclude=['*.rar', '*.r[[:digit:]][:digit:]]', '*.zip']
+rclone_exclude=['*.rar', '*.r[[:digit:]][[:digit:]]', '*.zip', '*'+file_ext_unpacked, file_name_lock]
 
-
-class Unrar(object):
+class Unpacker(object):
     def __init__(self, download_dir):
-        self.rclone_file_name = ".unpakr.rcloned"
         self.download_dir = download_dir
-        self.orig_files = []
-        self.orig_dirs = []
-        self.done_archives = []
+
+    def clean_all(self):
+        """Remove all unpacked files, which were stored in files matching *.unpakr-unpacked"""
+        logging.info('Cleaning extracted files in %s...', self.download_dir)
+        for dirname, _, filenames in os.walk(self.download_dir):
+            for f in filenames:
+                if f.endswith(file_ext_unpacked):
+                    logging.debug('Cleaning contents of %s/%s', dirname, f)
+                    with open(os.path.join(dirname, f)) as up:
+                        for fl in up:
+                            path = os.path.join(dirname, fl.strip())
+                            if os.path.isdir(path) and not os.path.islink(path):
+                                logging.debug('... %s', path)
+                                shutil.rmtree(path)
+                            elif os.path.exists(path):
+                                logging.debug('... %s', path)
+                                os.remove(path)
 
     def traverse_directories(self):
         """Scan the download directory and its subdirectories"""
         # Search download directory and all subdirectories
         num_errors = 0
-        logging.info("Walking %s...", self.download_dir)
-        for dirname, dirnames, filenames in os.walk(self.download_dir):
-            for d in dirnames:
-                self.orig_dirs.append(os.path.join(dirname, d))
-            for f in filenames:
-                self.orig_files.append(os.path.join(dirname, f))
+        logging.info('Walking %s...', self.download_dir)
+        for dirname, _, _ in os.walk(self.download_dir):
             num_errors += self.scan_for_archives(dirname)
         if num_errors > 0:
             logging.error('Done walking, encountered %d errors', num_errors)
@@ -107,7 +114,7 @@ class Unrar(object):
             arc, ext = os.path.splitext(str(filepath))
             if filepath.is_file() and ext in file_ext_supported:
                 file_done = target / (arc + file_ext_unpacked)
-                if arc in self.done_archives or file_done.exists():
+                if file_done.exists():
                     logging.info('Skipping previously done archive %s', target / filepath)
                     continue
                 # Start extracting file
@@ -115,7 +122,6 @@ class Unrar(object):
                 if self.unpack(target, filepath, ext) > 0:
                     num_errors += 1
                 else:
-                    self.done_archives.append(target / arc)
                     files_unpacked = sorted(list(set(self.findall(target)) - set(files_base)))
                     logging.debug('Unpacked %d files', len(files_unpacked))
                     with file_done.open('w') as f:
@@ -144,39 +150,95 @@ class Unrar(object):
             return 1
         return 0
 
-    def lock(self):
-        """Creates a hidden file so the script cannot run multiple times"""
-        os.close(os.open(
-            os.path.join(self.download_dir, file_name_lock),
-            os.O_CREAT | os.O_EXCL,
-            0o644
-        ))
-        logging.debug("%s file created", file_name_lock)
 
-    def unlock(self):
-        """Deletes the hidden lock file"""
-        os.unlink(os.path.join(self.download_dir, file_name_lock))
-        logging.debug("%s file deleted", file_name_lock)
+def lock(target_dir):
+    """Creates a hidden file so the script cannot run multiple times"""
+    os.close(os.open(
+        os.path.join(target_dir, file_name_lock),
+        os.O_CREAT | os.O_EXCL,
+        0o644
+    ))
+    logging.debug('%s/%s lock file created', target_dir, file_name_lock)
 
-if __name__ == "__main__":
-    # Ensure download dir argument is in fact a directory
-    assert(len(sys.argv) > 1 and os.path.isdir(sys.argv[1]))
-    unrar = Unrar(os.path.abspath(sys.argv[1]))
+def unlock(target_dir):
+    """Deletes the hidden lock file"""
+    os.unlink(os.path.join(target_dir, file_name_lock))
+    logging.debug('%s/%s lock file deleted', target_dir, file_name_lock)
+
+def parse_options():
+    from argparse import ArgumentParser, ArgumentTypeError
+
+    def a_dir(s):
+        if os.path.isdir(s):
+            return s
+        raise ArgumentTypeError('{} is not a directory'.format(s))
+    parser = ArgumentParser(description='Unpack archive files, rclone sync a directory, and clean up the unpacked files')
+    parser.add_argument('target_dir', metavar='DIR', type=a_dir, help='Directory to operate on')
+    parser.add_argument('--unpack', '-u', action='store_true', help='Unpack archives')
+    parser.add_argument('--rclone', '-r', metavar='REMOTE:TARGET', type=str, help='Rclone the base directory to REMOTE:TARGET')
+    parser.add_argument('--clean', '-c', action='store_true', help='Clean (remove) extracted files after cloning')
+    parser.add_argument('--logfile', '-l', metavar='LOGFILE', type=str, default='unpakr.log', help='Log file')
+    parser.add_argument('--loglevel', '-L', metavar='LEVEL', choices=['error','warning','info','debug'], default='info', help='Log level LEVEL = [error|warning|info|debug]')
+    return parser.parse_args()
+
+def do_rclone(target_dir, dest):
+    """Clone the target directory to a cloud storage service with rclone"""
+    logging.info('Starting rclone process: %s -> %s', target_dir, dest)
+    excludes = '\n'.join(rclone_exclude).encode()
+    cmd = [ exe_rclone,
+            '--exclude-from',
+            '/dev/stdin',
+            'copy',
+            target_dir,
+            dest ]
+    logging.debug('executing: %s', ' '.join(cmd))
+    rc = subprocess.run(cmd, input=excludes, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        rc.check_returncode()
+    except subprocess.CalledProcessError as e:
+        logging.error('rclone returned %d', e.returncode)
+        logging.error('rclone stderr: %s', e.stderr)
+        return 1
+    logging.info('Rclone completed successfully')
+    return 0
+
+if __name__ == '__main__':
+    opts = parse_options()
+    if opts.logfile:
+        logging.basicConfig(
+            filename=opts.logfile,
+            level=opts.loglevel.upper(),
+            format='%(asctime)s %(module)s %(levelname)s %(message)s'
+        )
+    else:
+        logging.basicConfig(
+            level=opts.loglevel.upper(),
+            format='%(asctime)s %(module)s %(levelname)s %(message)s'
+        )
 
     try:
         # Obtain the global lock
-        unrar.lock()
-
-        def unlock():
-            """Unlock the global lock file"""
-            unrar.unlock()
-
+        lock(opts.target_dir)
         import atexit
-        atexit.register(unlock)
+        atexit.register(unlock, opts.target_dir)
     except:
-        logging.error("Unable to obtain global lock")
+        logging.error('Unable to obtain global lock')
         exit(1)
 
-    # Extract
-    exit(unrar.traverse_directories())
+    rc = 0
+    if opts.unpack:
+        unpacker = Unpacker(os.path.abspath(opts.target_dir))
+        rc = unpacker.traverse_directories()
+
+    if opts.rclone:
+        if rc > 0:
+            logging.error('Syncing despite the Unpack errors')
+        if do_rclone(os.path.abspath(opts.target_dir), opts.rclone) > 0:
+            logging.error('Aborting execution due to rclone errors')
+            exit(1)
+
+    if opts.clean:
+        unpacker = Unpacker(os.path.abspath(opts.target_dir))
+        unpacker.clean_all()
+
 
