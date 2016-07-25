@@ -7,30 +7,38 @@
 #
 # Description:  Unpakr is a script designed to be run as a cron job (or
 #   scheduled task).  Its purpose is to recursively scan a directory for
-#   archive files, extract them, and then.  Upload them to a cloud service
-#   using rclone. The script is designed to be run at regular intervals and
-#   will create a file named .unpakr.unrared in each directory that contains an
-#   archive extracted by the script, and a file named .unpakr.rcloned when the
-#   archive has been sent to the cloud service via rclone. These files are used
-#   to tell the script, on subsequent scans, that the archive in the marked
-#   folder has previously been extracted and uploaded. The script will create
-#   a lock file in the target directory to prevent contention from multiple
-#   concurrent invocations.
+#   archive files, extract them, and upload them to a cloud service using
+#   rclone, and then finally delete the unpacked files. Each of these steps is
+#   optional.  The script is designed to be run at regular intervals and will
+#   create a file named .unpakr.unrared in each directory that contains an
+#   archive extracted by the script. These files are used to tell the script,
+#   on subsequent scans, that the archive in the marked folder has previously
+#   been extracted and uploaded. The script will create a lock file in the
+#   target directory to prevent contention from multiple concurrent
+#   invocations.
 #
-# Limitations:  Auto-Extract has been written to support one archive group per
+# Limitations:  Unpakr has been written to support one multiple archive groups per
 #   directory scanned (Example a movie in its own directory with files .rar,
-#   .r01, .r02, .nfo, etc). This works well with movies and other files that
-#   are packed and downloaded in individual directories.
+#   .r01, .r02, .nfo, etc). Embedded archives may be problematic if used with
+#   the -c option, since the embedded archives, along with their possibly
+#   extracted contents, will be wiped out at the cleaning stage. The setup is
+#   inteded to work well with movies and other files that are packed and
+#   downloaded in individual directories.
 #
-#   Auto-Extract will overwrite previously extracted files if it does not find
-#   a .unrared file present in the archive directory.
+#   Auto-Extract will overwrite previously extracted files if given the -u flag
+#   and it does not find a .unpakr-unpacked file present in the archive
+#   directory.
+#
+#   The script also works fine with .zip files.
 #
 # Requirements:
-# -Python 3.5 or newer
-# -unrar in your path [Freeware command line version available from http://www.rarlab.com/]
+#   -Python 3.5 or newer
+#   -unrar in your path [Freeware command line version available from http://www.rarlab.com/]
+#   -unzip in your path
 #
 # BUGS:
 #   -Cannot tell if an archive has been fully downloaded
+#   -Note above remark about embedded archives
 #
 # TODO:
 #   -Proper logging (ie. debug, info messages)
@@ -232,7 +240,7 @@ if __name__ == '__main__':
 
     if opts.rclone:
         if rc > 0:
-            logging.error('Syncing despite the Unpack errors')
+            logging.info('Syncing despite the Unpack errors')
         if do_rclone(os.path.abspath(opts.target_dir), opts.rclone) > 0:
             logging.error('Aborting execution due to rclone errors')
             exit(1)
