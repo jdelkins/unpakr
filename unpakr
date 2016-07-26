@@ -79,7 +79,6 @@ file_pat_ignore = {
 
 file_ext_supported = {
         '.rar': [exe_unrar, 'x', '-ai', '-idq', '-y', 'ARCHIVE', 'DESTINATION'],
-        '.r01': [exe_unrar, 'x', '-ai', '-idq', '-y', 'ARCHIVE', 'DESTINATION'],
         '.zip': [exe_unzip, '-q', '-o', 'ARCHIVE', '-d', 'DESTINATION'],
 }
 
