@@ -82,7 +82,7 @@ file_ext_supported = {
         '.zip': [exe_unzip, '-q', '-o', 'ARCHIVE', '-d', 'DESTINATION'],
 }
 
-rclone_exclude=['*.rar', '*.r[[:digit:]][[:digit:]]', '*.zip', '*'+file_ext_unpacked, file_name_lock]
+rclone_exclude=['*.rar', '*.r[[:digit:]][[:digit:]]', '*.zip', '*.sfv', '*.par2', '*'+file_ext_unpacked, file_name_lock]
 
 class Unpacker(object):
     def __init__(self, download_dir):
